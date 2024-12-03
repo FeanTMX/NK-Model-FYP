@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-#this is the model run and produces a output file containing raw fitness and bit data
+#%%
 
 #installer
 import pip
@@ -19,6 +19,8 @@ import random as rand
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import multiprocessing
+import datetime
 
 #function def
 def hamming_dist(bit1, bit2):
@@ -234,7 +236,7 @@ class ArtificialAgent:
         
         possibilities.sort(key =  lambda x: hamming_dist(x, state))
         
-        search_space = min(len(possibilities), self.con)
+        search_space = int(self.con_p*len(possibilities))
         bit = possibilities[0]
         cog_space = generate_ai_cognitive_space(self.kb, human_kb, self.cap)
         best_fitness = self.query_fitness(bit, cog_space) #calculates fitness based on own kb and also human's existing information
@@ -247,17 +249,17 @@ class ArtificialAgent:
                 best_bit = bit
         return best_bit
 
-def baseline_model(N, K, computational_constraint, human_kb_idx, aa_kb_idx, trials, prompt, understand_capability, acceptance_probability = 1):
+def baseline_model(N, K, aa_kb_idx, non_aa_kb_idx, computational_constraint, trials, prompt, understand_capabilities, overlap, acceptance_probability = 1):
     """
     Runs a baseline NK model with Human-AI Partnership
     N - Number of decision variables, forms NK landscape
     K - Number of dependencies, defines landscape ruggedness
-    computational_constraints - Defines the constraints under which the AA can search. Mathematically, it limits the number of points that AA can search in one search.
-    human_kb_idx - the indices that defines the human knowledge base. Should range from 0:N
-    aa_kb_idx - the indices that defines the AA knowledge base. Should range from 0:N
-    trials - number of trials to run this model, and take average
+    aa_kb_idx - Knowledge base for AI
+    non_aa_kb_idx - index that is outside of aa_kb for human knowledge base to sample from
+    computational_constraint - Defines the constraints under which the AA can search. Mathematically, it limits the number of points that AA can search in one search.
+    trials - number of trials to run this model. Model will generate 'trials' number of landscapes and 'trial' * 10 number of agents for each landscape
     prompt - what the humans prompt the AA. Its a subset of aa_kb_idx, and is default across runs
-    understand_capability - the ability of the AA to understand humans
+    understand_capabilities - a list of understand capability
     acceptance probability: probability that human accepts the AA solutions, scaled to the fitness of the AA solution
     returns a dictionary of runs and their fitness values throughout the run
     """
@@ -271,7 +273,15 @@ def baseline_model(N, K, computational_constraint, human_kb_idx, aa_kb_idx, tria
         np.random.seed(None)
         landscape = LandScape(N, K, None, None) #instantiate Landscape
         landscape.initialize(norm=True)
-        for j in range(trials):
+        for j in range(trials*10): #generate more agents
+            #print(f'Landscape: {i}, Agent: {j}')
+            #randomize understanding capability
+            understand_capability = rand.choice(understand_capabilities)
+            #randomize the human knowledge, but keep overlap and aa_kb_idx fixed
+            human_kb_idx = rand.sample(aa_kb_idx, overlap)
+            human_kb_idx += rand.sample(non_aa_kb_idx, rand.randint(0, len(non_aa_kb_idx) - 1))
+            if len(human_kb_idx) == 0:
+                human_kb_idx = [rand.choice(non_aa_kb_idx)]
             agent = Agent(N, landscape, human_kb_idx, acceptance_probability) #instantiate agent
             aa = ArtificialAgent(N, landscape, aa_kb_idx, computational_constraint, understand_capability) #instantiate AA
             fitness = [] #stores fitness over iterations
@@ -280,54 +290,80 @@ def baseline_model(N, K, computational_constraint, human_kb_idx, aa_kb_idx, tria
             coord_cf = [] #stores coordinates/ states
             for iter in range(search_iteration):
                 #first, human conduct search
-                print('initial:', agent.state, agent.fitness)
+                #print('initial:', agent.state, agent.fitness)
                 agent.search()
                 search_results = agent.state
                 #then, human pass to AA to help
                 aa_results = aa.search(''.join(str(num) for num in search_results), prompt, agent.kb)
                 #human reviews the solutions given by AA, and chooses if he wants to take it in
                 agent.review(aa_results)
-                fitness.append(agent.fitness)
-                fitness_cf.append(agent.fitness_cf)
+                fitness.append(agent.landscape.query_fitness(agent.state))
+                fitness_cf.append(agent.landscape.query_fitness(agent.state_cf))
                 coord.append(str(agent.state))
                 coord_cf.append(str(agent.state_cf))
-                print('searched:', agent.state, agent.fitness)
-                print('searched (counterfactual):', agent.state_cf, agent.fitness_cf)
-            results_fitness['run_' + str(run_cnt)] = fitness
+                # print('searched:', agent.state, agent.fitness)
+                # print('searched (counterfactual):', agent.state_cf, agent.fitness_cf)
+            print(f'{datetime.datetime.now()}: run_{run_cnt})_landscape_{i}_humanknw_{len(human_kb_idx)}')
+            results_fitness[f'run_{run_cnt}_landscape_{i}_humanknw_{len(human_kb_idx)}-exp'] = fitness
+            results_fitness[f'run_{run_cnt}_landscape_{i}_humanknw_{len(human_kb_idx)}-cf'] = fitness_cf
             counterfactual_fitness['run_' + str(run_cnt)] = fitness_cf
-            results_coord['run_' + str(run_cnt)] = coord
+            results_coord[f'run_{run_cnt}_landscape_{i}_humanknw_{len(human_kb_idx)}-exp'] = coord
+            results_coord[f'run_{run_cnt}_landscape_{i}_humanknw_{len(human_kb_idx)}-cf'] = coord_cf
             counterfactual_coord['run_' + str(run_cnt)] = coord_cf
             run_cnt += 1
     return {"Experiment Fitness": results_fitness, "Experiment Bits": results_coord,
             "Counterfactual Fitness": counterfactual_fitness, "Counterfactual Bits": counterfactual_coord}
 
-#run model a few times
-N = 12
-k_lst = [0, 2, 4, 6, 8, 11]
-computational_constraint = 0.7
-idx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-aa_kb_idx = [6, 7, 8, 9, 10, 11]
-trials = 100
-prompt = aa_kb_idx
-uhk = 6
-understand_capability = [0.2, 0.4, 0.6, 0.8, 0.9, 1]
-
-#investigate different levels of understand_capability
-for undst_cap in understand_capability:
-    #investigate different k
-    for K in k_lst:
-        #export as local files
-        path = f"../tmp/data_290924/initial_uhk_{uhk}/undst_cap_{undst_cap}/k{K}/"
-        os.makedirs(f"../tmp/data_290924/initial_uhk_{uhk}/undst_cap_{undst_cap}/k{K}/", exist_ok=True)
-        #investigate humans with different levels of knowledge
-        for i in range (6, 13):
-            human_kb_idx = idx[:i]
-            overlap = list(set(human_kb_idx) & set(aa_kb_idx))    
-            raw_data = baseline_model(N, K, computational_constraint, human_kb_idx, aa_kb_idx, trials, prompt, undst_cap)
-            pd.DataFrame(raw_data["Experiment Fitness"]).to_csv(f'{path}exp_fit_human_knw_{str(i)}.csv')
-            pd.DataFrame(raw_data["Experiment Bits"]).to_csv(f'{path}exp_bit_human_knw_{str(i)}.csv')
-            pd.DataFrame(raw_data["Counterfactual Fitness"]).to_csv(f'{path}cf_fit_human_knw_{str(i)}.csv')
-            pd.DataFrame(raw_data["Counterfactual Bits"]).to_csv(f'{path}cf_bit_human_knw_{str(i)}.csv')
+def job(N, K, aa_kb_idx, non_aa_kb_idx, computational_constraint, trials, prompt, understand_capabilities, overlap, current_directory):
+    try:
+        os.chdir(current_directory)
+        worker_id = multiprocessing.current_process().name 
+        print(f"Current Worker: {worker_id}")
+        #code for multiprocessing
+        path = f"../tmp/data_281024/comp_constraint_{computational_constraint}/overlap_{overlap}/k{K}/"
+        os.makedirs(f"../tmp/data_281024/comp_constraint_{computational_constraint}/overlap_{overlap}/k{K}/", exist_ok=True)
+        raw_data = baseline_model(N, K, aa_kb_idx, non_aa_kb_idx, computational_constraint, trials, prompt, understand_capabilities, overlap)
+        fitness = pd.DataFrame(raw_data["Experiment Fitness"])
+        fitness.to_csv(f'{path}exp_fit.csv')
+        bits = pd.DataFrame(raw_data["Experiment Bits"])
+        bits.to_csv(f'{path}exp_bit.csv')
+        fitness_cf = pd.DataFrame(raw_data["Counterfactual Fitness"])
+        fitness_cf.to_csv(f'{path}cf_fit.csv')
+        bits_cf = pd.DataFrame(raw_data["Counterfactual Bits"])
+        bits_cf.to_csv(f'{path}cf_bit.csv')
+        #select specific timings to investigate
+        #fitness.iloc[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 99]].to_csv(f'{path}exp_fit_condensed.csv')
+        #bits.iloc[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 99]].to_csv(f'{path}exp_bit_condensed.csv')
+        #fitness_cf.iloc[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 99]].to_csv(f'{path}cf_fit_condensed.csv')
+        #bits_cf.iloc[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 99]].to_csv(f'{path}cf_bit_condensed.csv')
+    except Exception as e:
+        print(e)
 
 
-    
+if __name__ == '__main__':
+    #run model a few times
+    N = 12
+    k_lst = [6, 8]
+    computational_constraints = [0.7, 1]
+    idx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    aa_kb_idx = [6, 7, 8, 9, 10, 11]
+    non_aa_kb_idx = [0, 1, 2, 3, 4, 5]
+    trials = 100
+    prompt = aa_kb_idx
+    uhk = 2
+    understand_capabilities = [0.2, 0.4, 0.6, 0.8, 0.9, 1]
+    overlaps = [0, 1, 2, 3, 4, 5, 6]
+    processes = []
+    current_directory = os.getcwd()
+    with multiprocessing.Pool() as pool:
+        job_args = [
+            (N, K, aa_kb_idx, non_aa_kb_idx, computational_constraint, trials, prompt, understand_capabilities, overlap, current_directory)
+            for computational_constraint in computational_constraints
+            for K in k_lst
+            for overlap in overlaps
+        ]
+        pool.starmap(job, job_args)
+        pool.close()
+        pool.join()
+
+# %%
